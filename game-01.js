@@ -11,12 +11,12 @@
     { id: 'market', name: '赶集市', industry: '集市', description: '去集市张罗些急用。', effect: '立即 +10 海贝', lasting: '每级开局 +6 海贝' }
   ];
   const DIFFICULTIES = {
-    novice: { name: '新手', reward: 30, duration: 20, upSpeed: 0.60, downSpeed: 0.72, gain: 0.20, decay: 0.04, widths: [0.60, 0.50, 0.44], amplitudes: [0, 0.06, 0.09], periods: [7, 7, 6], tigerDamage: 25 },
+    novice: { name: '新手', reward: 30, duration: 25, upSpeed: 0.60, downSpeed: 0.62, gain: 0.22, decay: 0.03, widths: [0.68, 0.58, 0.50], amplitudes: [0, 0.05, 0.08], periods: [7, 7, 6], tigerDamage: 15 },
     normal: { name: '正常', reward: 50, duration: 12, upSpeed: 0.72, downSpeed: 0.90, gain: 0.18, decay: 0.09, widths: [0.32, 0.25, 0.20], amplitudes: [0, 0.12, 0.16], periods: [5, 4.5, 3.8], tigerDamage: 35 },
     veteran: { name: '老手', reward: 80, duration: 13, upSpeed: 0.85, downSpeed: 1.00, gain: 0.16, decay: 0.14, widths: [0.23, 0.16, 0.12], amplitudes: [0.06, 0.18, 0.23], periods: [4, 3.5, 3], tigerDamage: 40 },
     impossible: { name: '不可能', reward: 140, duration: 14, upSpeed: 0.95, downSpeed: 1.15, gain: 0.15, decay: 0.18, widths: [0.15, 0.10, 0.075], amplitudes: [0.10, 0.22, 0.27], periods: [3, 2.5, 2.2], tigerDamage: 50 }
   };
-  const COMBAT = { hp: 120, playerHp: 100, attackDamage: 10, attackCooldown: 0.65, counterDamage: 15, intro: 0.8, ring: 1.8, rightRing: 2.1, recover: 0.6, pairRecover: 0.95, result: 1, minRadius: 48, maxRadius: 72 };
+  const COMBAT = { hp: 120, playerHp: 100, attackDamage: 10, attackCooldown: 0.65, counterDamage: 15, intro: 0.8, ring: 1.8, rightRing: 2.1, recover: 0.6, pairRecover: 0.95, result: 1, minRadius: 42, maxRadius: 78 };
   // 评分只奖励可观察的表现：剩余时间、在绿区的时间、闪避与图鉴发现。
   const SCORE = {
     horseBase: 60, horseTime: 25, horseSteady: 15, retryPenalty: 10, retryPenaltyCap: 20,
@@ -528,11 +528,15 @@
   }
 
   function startTiger(s, nextHorse, trigger = 'chapter') {
+    const training = trigger === 'training';
     const playerHp = COMBAT.playerHp + (s.upgrades.fish ? 25 : 0);
     const enemyHp = COMBAT.hp + (s.mode === 'endless' ? Math.min(180, (s.endlessRound - 1) * 10) : 0);
-    s.tigerUsed = true;
-    if (trigger === 'chapter') s.tigerChapterUsed = true;
-    if (trigger === 'finale') s.finalTigerUsed = true;
+    // 训练战不占用章节额度，也不影响本局标记与图鉴解锁。
+    if (!training) {
+      s.tigerUsed = true;
+      if (trigger === 'chapter') s.tigerChapterUsed = true;
+      if (trigger === 'finale') s.finalTigerUsed = true;
+    }
     s.state = 'tiger';
     s.activeHorse = null;
     s.tiger = {
@@ -544,7 +548,8 @@
       hitFlash: 0, playerHitFlash: 0, attacks: 0, round: 0,
       activeTiger: 0, hitSide: 'left',
       activeStrike: 0, wave: 0, strikeSerial: 0,
-      combatDifficulty: (trigger === 'finale' || s.mode === 'endless' && s.endlessRound >= 3) && s.difficulty !== 'impossible' ? 'veteran' : s.difficulty,
+      // 新手与正常不再被抬到老手强度的困难版本：终战、无尽守关都按所选难度出招。
+      combatDifficulty: s.difficulty,
       pressure: s.mode === 'endless' ? 1 + Math.min(12, s.endlessRound - 1) * .025 : 1,
       shield: s.mode === 'endless' && s.endlessShield,
       fighters: [
@@ -555,15 +560,26 @@
     launchVolley(s.tiger);
     syncTiger(s.tiger);
     if (s.mode === 'endless') s.endlessShield = false;
-    s.notice = trigger === 'finale' ? '七马归位！迎接四道攻击的双虎终战，战后开启文物档案。' : trigger === 'chapter' ? '四组归位，器耳双虎苏醒！' : '驯马超时，惊动了器耳双虎！';
-    unlock(s, ['armor', 'fork']);
+    s.notice = trigger === 'training' ? '双虎战训练：不扣海贝、不计分，练完回到主页面。' : trigger === 'finale' ? '七马归位！迎接' + s.tiger.strikes.length + '道攻击的双虎终战，战后开启文物档案。' : trigger === 'chapter' ? '四组归位，器耳双虎苏醒！' : '驯马超时，惊动了器耳双虎！';
+    if (!training) unlock(s, ['armor', 'fork']);
+  }
+
+  // 主页面入口的双虎战训练：从标题直接开局，战后回到标题，不改动存档进度。
+  function startTigerTraining(s) {
+    if (s.state !== 'title') return false;
+    const difficulty = validDifficulty(s.difficulty) ? s.difficulty : 'novice';
+    Object.assign(s, createGame());
+    s.difficulty = difficulty;
+    startTiger(s, 0, 'training');
+    return true;
   }
 
   function launchVolley(tiger) {
-    const high = ['veteran', 'impossible'].includes(tiger.combatDifficulty);
+    // 攻击圈数量按难度：新手1道、正常2道，老手与不可能4道。
+    const count = { novice: 1, normal: 2, veteran: 4, impossible: 4 }[tiger.combatDifficulty] || 2;
     const spacing = Math.max(.9, { novice: 2.5, normal: 2, veteran: 1.5, impossible: 1.2 }[tiger.combatDifficulty] / tiger.pressure);
     tiger.wave++;
-    tiger.strikes = Array.from({ length: high ? 4 : 2 }, (_, index) => ({
+    tiger.strikes = Array.from({ length: count }, (_, index) => ({
       id: ++tiger.strikeSerial, order: index + 1, side: index % 2 ? 'right' : 'left',
       duration: COMBAT.ring + index * spacing, elapsed: 0, radius: 180, resolved: false, outcome: null
     }));
@@ -609,6 +625,11 @@
     s.tiger.result = success ? 'success' : 'failure';
     for (const strike of s.tiger.strikes) { if (!strike.resolved) strike.outcome = 'cancelled'; strike.resolved = true; }
     for (const fighter of s.tiger.fighters) fighter.phase = 'done';
+    // 训练战只练手：不扣海贝、不计分、不记胜负，结束直接回主页面。
+    if (s.tiger.trigger === 'training') {
+      s.notice = success ? '训练完成：双虎退却！返回主页面，随时可以再练。' : '训练结束：不扣海贝也不计分，返回主页面可以再来一次。';
+      return;
+    }
     if (s.tiger.trigger === 'finale') s.finalTigerFinished = true;
     if (!success && s.mode !== 'endless' && s.difficulty !== 'novice') s.cowries = Math.floor(s.cowries * 70 / 100);
     if (success) s.tigerWins += 1; else s.tigerLosses += 1;
@@ -754,7 +775,7 @@
         tiger.phase = 'ring';
         tiger.elapsed = 0;
         syncTiger(tiger);
-        tiger.feedback = tiger.strikes.length + '道攻击同时逼近！按编号依次闪避。';
+        tiger.feedback = tiger.strikes.length + '道攻击逼近！按编号依次闪避。';
       } else if (['ring', 'recover'].includes(tiger.phase)) {
         advanceStrikes(tiger, dt);
         if (tiger.phase === 'recover') {
@@ -768,6 +789,13 @@
         const target = tiger.strikes[tiger.activeStrike];
         if (tiger.phase === 'ring' && target.elapsed + EPSILON >= target.duration) resolveRound(s, false);
       } else if (tiger.phase === 'result' && tiger.elapsed + EPSILON >= COMBAT.result) {
+        if (tiger.trigger === 'training') {
+          // 训练战结束回到主页面，不落到地图。
+          Object.assign(s, createGame());
+          s.difficulty = tiger.combatDifficulty && validDifficulty(tiger.combatDifficulty) ? tiger.combatDifficulty : s.difficulty;
+          s.notice = tiger.result === 'success' ? '训练完成：双虎退却！可以再来一次。' : '训练结束：不扣海贝也不计分，可以再来一次。';
+          return;
+        }
         if (s.mode === 'endless') {
           if (s.courage <= 0) endEndless(s, 'courage');
           else if (tiger.trigger === 'finale') s.state = tiger.result === 'success' ? 'endless-break' : 'endless-retry';
@@ -786,7 +814,7 @@
     }
   }
 
-  const api = { DIFFICULTIES, COMBAT, SCORE, ERRANDS, INDUSTRY_CAP, SAVE_KEY, save, enterVictory, resolveErrand, errandOptions, createGame, setDifficulty, setMode, startRun, startHorse, skipTutorial, buy, buySupply, getProfile: profile, getEndlessRecord, continueEndless, retryEndlessBoss, endEndless, getReward, getZone, getTamingCue, getDodgeCue, gradeFor, scoreBreakdown, averageHorseScore, runStars, step, attack, dodge };
+  const api = { DIFFICULTIES, COMBAT, SCORE, ERRANDS, INDUSTRY_CAP, SAVE_KEY, save, enterVictory, resolveErrand, errandOptions, createGame, setDifficulty, setMode, startRun, startHorse, startTigerTraining, skipTutorial, buy, buySupply, getProfile: profile, getEndlessRecord, continueEndless, retryEndlessBoss, endEndless, getReward, getZone, getTamingCue, getDodgeCue, gradeFor, scoreBreakdown, averageHorseScore, runStars, step, attack, dodge };
   root.GameCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

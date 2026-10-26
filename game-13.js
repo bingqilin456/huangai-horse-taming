@@ -5,7 +5,7 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 }(typeof globalThis !== 'undefined' ? globalThis : this, function (root) {
   'use strict';
-  let enabled = true, unlocked = false, context = null, master = null, loop = null;
+  let enabled = true, unlocked = false, context = null, master = null, output = null, loop = null;
   let noise = null, masterLevel = -1, paused = false, voiceCategory = 'gameplay';
   let musicEnabled = true, music = null, lastInfo = {};
   let musicVolume = 1, sfxVolume = 1;
@@ -29,7 +29,7 @@
     if (!master || masterLevel === value) return;
     masterLevel = value; ramp(master.gain, value, 0.06);
   }
-  // 音效与配音共用主音量；背景音乐单独走各自的增益节点，两者互不影响。
+  // 音效与背景音乐独立调节，最终与配音一起进入放大和限幅输出。
   const sfxLevel = () => 0.72 * sfxVolume;
   function stop(source, delay) { try { source.stop(time() + delay); } catch (_) { /* Already stopped. */ } }
   function stopLoop() {
@@ -80,7 +80,7 @@
           const media = new root.Audio(track.src), gain = context.createGain();
           media.loop = true; media.preload = 'none'; gain.gain.value = 0;
           const source = context.createMediaElementSource(media);
-          source.connect(gain); gain.connect(context.destination);
+          source.connect(gain); gain.connect(output);
           player = { kind, media, source, gain, timer: null, failed: false, level: 0, pending: false, attempt: 0 };
           media.addEventListener('error', () => { player.failed = true; media.pause(); });
           players.set(kind, player);
@@ -114,13 +114,26 @@
         if (!Audio) return Promise.resolve(false);
         context = new Audio();
         master = context.createGain(); master.gain.value = 0;
-        // 限幅器兜底：多层激励音叠加时不至于破音，同时允许更高的实际响度。
+        // 全部声音统一提升约6dB；限幅作用于最终混音，包含音乐、音效和馆长配音。
+        output = context.createGain(); output.gain.value = 2;
+        master.connect(output);
+        let destination = context.destination;
+        // 压缩器有起音时间，配音瞬态仍可能越过满幅；最后一级平滑收拢峰值。
+        if (typeof context.createWaveShaper === 'function') {
+          const guard = context.createWaveShaper(), curve = new Float32Array(4097);
+          for (let i = 0; i < curve.length; i++) {
+            const x = i * 2 / (curve.length - 1) - 1, magnitude = Math.abs(x);
+            curve[i] = magnitude <= 0.85 ? x : Math.sign(x) * (0.85 + 0.12 * Math.tanh((magnitude - 0.85) / 0.12));
+          }
+          guard.curve = curve; guard.oversample = '4x';
+          guard.connect(destination); destination = guard;
+        }
         if (typeof context.createDynamicsCompressor === 'function') {
           const limiter = context.createDynamicsCompressor();
-          limiter.threshold.value = -8; limiter.knee.value = 8; limiter.ratio.value = 6;
+          limiter.threshold.value = -3; limiter.knee.value = 3; limiter.ratio.value = 12;
           limiter.attack.value = 0.003; limiter.release.value = 0.2;
-          master.connect(limiter); limiter.connect(context.destination);
-        } else master.connect(context.destination);
+          output.connect(limiter); limiter.connect(destination);
+        } else output.connect(destination);
       }
       unlocked = context.state === 'running';
       if (ready()) level(sfxLevel());
@@ -132,6 +145,14 @@
         return !!unlocked;
       }).catch(() => false);
     } catch (_) { return Promise.resolve(false); }
+  }
+  function connectVoice(media) {
+    if (!context || !output) return null;
+    try {
+      const source = context.createMediaElementSource(media);
+      source.connect(output);
+      return source;
+    } catch (_) { return null; }
   }
   function tone(frequency, duration, volume, delay, endFrequency, type) {
     if (!ready() || active.size >= 24) return;
@@ -269,7 +290,7 @@
     root.document.addEventListener('visibilitychange', () => { if (hidden()) { quiet(); stopMusic(true); } });
     root.document.addEventListener('pointerdown', unlock, { passive: true });
   }
-  return { unlock, toggle, get enabled() { return enabled; }, play, update, toggleMusic, setMusicVolume, setSfxVolume,
+  return { unlock, toggle, get enabled() { return enabled; }, play, update, toggleMusic, setMusicVolume, setSfxVolume, connectVoice,
     get musicEnabled() { return musicEnabled; },
     get musicVolume() { return musicVolume; },
     get sfxVolume() { return sfxVolume; },
